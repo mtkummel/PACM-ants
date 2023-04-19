@@ -1,0 +1,705 @@
+---
+title: "threshold"
+output: html_document
+date: "2022-11-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 
+
+```{r library}
+library(tidyverse)
+library(ggplot2)
+```
+
+## model
+
+```{r }
+#####CONSTANTS####
+
+# number of individuals n
+
+n<-30
+
+#number of tasks m
+
+m<-2
+
+#Probability exponent
+eta<-10 # in paper range from 1 to 30
+#all tasks same demand rate
+demandRate<-0.6 
+# if all demand differtn stimulusRate<-vector(mode="numeric", length=m)
+
+#reduction in stimulus if all individuals 
+#in colony do the task
+alpha<-50
+
+#quit probability
+tau<-0.2
+
+corrStep       <- 200 #number of time steps for calculation of correlation 
+
+
+threshMean<-10 #forr both tasks
+threshSD<-0.1
+#time
+timesteps<-10000
+ThreshM        <- c(10, 10) #population threshold means 
+ThreshSD       <- ThreshM * 0 #population threshold standard deviations 
+InitialStim    <- c(0, 0) #intital vector of stimuli
+StimRates      <- c(0.6, 0.6) #vector of stimuli increase rates  
+threshSlope    <- 30 #exponent parameter for threshold curve shape  
+alpha          <- m #efficiency of task performance
+quitP          <- 0.2 #probability of quitting task once active
+
+
+
+```
+
+```{r}
+
+#### FUNCTIONS####
+
+#stimulus update function
+stimFunc<-function(stimVec,activityMat,demandRate,alpha,n){
+  output<-stimVec+demandRate-alpha*(colSums(activityMat)/n)
+  output[output<0]<-0
+  return(output)
+}
+
+probabilityfunc<-function(threshMat,stimVec,n,m,eta){
+  probMat<-matrix(data = 0, nrow=n,ncol=m)
+  for (i in 1:m) {
+    s<-stimVec[i]
+    denominator<-s^eta+threshMat[,i]^eta
+    P<-(s^eta)/denominator
+    probMat[,i]<-P
+  }
+  return(probMat)
+}
+```
+
+
+```{r}
+####SYSTEM SETUP####
+
+#activity matrix
+
+activityMat<-matrix(data=0,nrow=n,ncol=m)
+
+#active(1) or inactive (0)
+
+activity<-vector(mode="numeric", length=n)
+
+#stimulus
+stimulusVec<-vector(mode="numeric", length=m)
+
+
+# internal  thresholds (same for all tasks)
+
+thresholdMat<-matrix(data=rnorm(n*m,mean = threshMean,sd=threshSD*threshMean),nrow=n,ncol=m)
+
+```
+
+```{r}
+#### DATA RECORDS####
+stimTrack<-matrix(data=0,nrow=timesteps,ncol=m)
+activityTrack<-matrix(data=0,nrow=timesteps,ncol=n)
+workersTrack<-matrix(data=0,nrow=timesteps,ncol=m)
+
+```
+
+```{r}
+####TIMESTEPPING####
+
+for (t in 1:timesteps) {
+  #update probabilities
+  probabilities<-probabilityfunc(threshMat=thresholdMat, stimVec = stimulusVec,n=n,m=m, eta=eta)
+  
+  #update individuals
+  activity<-rowSums(activityMat)
+  quits<-rbinom(n=n,size=1,prob=tau)
+  for (i in 1:n) {
+    #active individuals may become inactive
+    if (activity[i]==1&&quits[i]==1) {
+        activityMat[i,]<-matrix(data=0,nrow=1,ncol=m)
+    }
+    #inactive individuals may become active 
+    if (activity[i]==0) {
+      seq<-sample(1:m,m)
+      for (j in 1:m) {
+        activity[i]<-sum(activityMat[i,])
+        if (activity[i]==0) {
+          taskNum<-seq[j]
+          taskProb<-probabilities[i,taskNum]
+          activityMat[i,taskNum]<-rbinom(n=1,size=1,prob=taskProb)
+        }
+      }
+    }
+    }
+  
+  #change stimulus from activity in the past timestep
+  stimulusVec<-stimFunc(stimulusVec,activityMat,demandRate,alpha,n) 
+  
+  #record data
+  stimTrack[t,]<-stimulusVec
+  activityTrack[t,]<-rowSums(t(t(activityMat)*1:m))
+  workersTrack<-colSums(activityMat)
+  }
+  
+
+```
+
+```{r}
+#### plot data####
+timeElapsed<-1:timesteps
+stimTrackGraph<-cbind(timeElapsed,stimTrack) %>% as.data.frame()
+
+
+ggplot(data=stimTrackGraph)+
+  geom_line(aes(x=timeElapsed,y=V2))+
+  geom_line(aes(x=timeElapsed,y=V3))
+```
+
+```{r}
+#workers 
+
+#task performance frequency profile
+workers<-1:n
+task1<-colSums(activityTrack==1)/timesteps
+task2<-colSums(activityTrack==2)/timesteps
+
+freqProfile<-cbind(workers,task1,task2) %>% as.data.frame()
+task1<-colSums(activityTrack==1)/colSums(activityTrack>0)
+task2<-colSums(activityTrack==2)/colSums(activityTrack>0)
+
+freqProfile2<-cbind(workers,task1,task2) %>% as.data.frame()
+
+ColonyAvgs<-freqProfile %>% summarise(mean(task1),sd(task1),mean(task2),sd(task2))
+
+ColonyAvgs
+
+freqProfile2 %>% summarise(mean(task1),sd(task1),mean(task2),sd(task2))
+
+
+ggplot(data=freqProfile2 %>% pivot_longer(cols = c(2,3), names_to = "task",values_to = "frequency"))+
+  geom_histogram(aes(x=frequency,y=..density..,fill=as.factor(task)), position="identity", alpha=0.4)
+```
+
+
+### try to determine fate of one individual
+
+```{r}
+roleDeterminismFunc<-function(n,m,threshMean,threshSD,individualThresh,reps,timesteps){
+  timeProportion<-matrix(data=0,nrow=reps,ncol=m)
+  for (r in 1:reps) {
+    thresholdMat<-matrix(data=rnorm(n*m,mean = threshMean,sd=threshSD*threshMean),nrow=n,ncol=m)
+thresholdMat[1,]<-c(individualThresh,2*threshMean-individualThresh)
+
+activityMat<-matrix(data=0,nrow=n,ncol=m)
+
+#active(1) or inactive (0)
+
+activity<-vector(mode="numeric", length=n)
+
+#stimulus
+stimulusVec<-vector(mode="numeric", length=m)
+
+antTrack<-vector(mode="numeric", length=timesteps)
+for (t in 1:timesteps) {
+  #update probabilities
+  probabilities<-probabilityfunc(threshMat=thresholdMat, stimVec = stimulusVec,n=n,m=m, eta=eta)
+  
+  #update individuals
+  activity<-rowSums(activityMat)
+  quits<-rbinom(n=n,size=1,prob=tau)
+  for (i in 1:n) {
+    #active individuals may become inactive
+    if (activity[i]==1&&quits[i]==1) {
+        activityMat[i,]<-matrix(data=0,nrow=1,ncol=m)
+    }
+    #inactive individuals may become active 
+    if (activity[i]==0) {
+      seq<-sample(1:m,m)
+      for (j in 1:m) {
+        activity[i]<-sum(activityMat[i,])
+        if (activity[i]==0) {
+          taskNum<-seq[j]
+          taskProb<-probabilities[i,taskNum]
+          activityMat[i,taskNum]<-rbinom(n=1,size=1,prob=taskProb)
+        }
+      }
+    }
+    }
+  
+  #change stimulus from activity in the past timestep
+  stimulusVec<-stimFunc(stimulusVec,activityMat,demandRate,alpha,n) 
+  
+  #record data
+  antTrack[t]<-sum(activityMat[1,]*1:m)
+  }
+task1<-sum(antTrack==1)
+task2<-sum(antTrack==2)
+
+timeProportion[r,]<-c(sum(task1)/timesteps,sum(task2)/timesteps)
+  }
+  return(timeProportion)
+}
+
+roleDeterminismFunc(n=10,m=2,threshMean=10, threshSD=0.1, individualThresh = 10,reps=100,timesteps=10000) %>% colMeans()
+
+```
+
+##DETERMINISM###
+
+What do we want to compare to?
+baseline: all ants are the same
+baseline: all ants are random
+--what are the effects of fixing the ant?
+--what are the effects of the inherent stochasticity?
+--what do we want to understand about the system
+
+test: run all ants the same on long timescales--even out the stochasticity?
+
+What parts of variation is caused by the thresholds vs other sources of stochasticity?
+
+paper figure 7 but from the perspective of the individual ant
+--which sources of stochasticity are most responsible for the spread?--fix thresholds 
+
+create nested problems: start from baselines
+isolate  each source of stochasticity
+
+task neglect--only at larger group sizes task neglect is less of a problem
+
+Merlijn:ask questions about individual variation  in the limit not the short term--easier starting point: what is the influence of other ants?
+
+analogy: living in an apartment--how  much does the choice  of co-residents influence which tasks you specialize on?
+
+pull timestep choice  from paper
+
+problem to address: runaway task demand? should we ask the question only under conditions where greoups can  manage?
+
+follow up paper-
+
+
+game plan--consider baseline cases and special cases so we don't overinterpret the findings
+
+make sure groups don't fail, figure out simulations
+answer questions with groups with uniform thresholds
+
+consider completely random assemblages
+
+
+What determines behavior?
+individual traits
+group traits
+random chance
+
+Meaningful question!
+
+
+
+```{r}
+individualThresh<-c(threshMean-threshMean*threshSD,threshMean+threshMean*threshSD)
+```
+
+```{r}
+n<-3
+m<-2
+reps<-200
+timesteps<-5000 ## run this for longer
+```
+
+```{r}
+timeProportion<-matrix(data=0,nrow=reps,ncol=m)
+thresholdMat<-matrix(data=rnorm(n*m,mean = threshMean,sd=threshSD*threshMean),nrow=n,ncol=m)
+thresholdMat[1,]<-individualThresh  
+for (r in 1:reps) {
+
+activityMat<-matrix(data=0,nrow=n,ncol=m)
+
+#active(1) or inactive (0)
+
+activity<-vector(mode="numeric", length=n)
+
+#stimulus
+stimulusVec<-vector(mode="numeric", length=m)
+
+antTrack<-vector(mode="numeric", length=timesteps)
+for (t in 1:timesteps) {
+  #update probabilities
+  probabilities<-probabilityfunc(threshMat=thresholdMat, stimVec = stimulusVec,n=n,m=m, eta=eta)
+  
+  #update individuals
+  activity<-rowSums(activityMat)
+  quits<-rbinom(n=n,size=1,prob=tau)
+  for (i in 1:n) {
+    #active individuals may become inactive
+    if (activity[i]==1&&quits[i]==1) {
+        activityMat[i,]<-matrix(data=0,nrow=1,ncol=m)
+    }
+    #inactive individuals may become active 
+    if (activity[i]==0) {
+      seq<-sample(1:m,m)
+      for (j in 1:m) {
+        activity[i]<-sum(activityMat[i,])
+        if (activity[i]==0) {
+          taskNum<-seq[j]
+          taskProb<-probabilities[i,taskNum]
+          activityMat[i,taskNum]<-rbinom(n=1,size=1,prob=taskProb)
+        }
+      }
+    }
+    }
+  
+  #change stimulus from activity in the past timestep
+  stimulusVec<-stimFunc(stimulusVec,activityMat,demandRate,alpha,n) 
+  
+  #record data
+  antTrack[t]<-sum(activityMat[1,]*1:m)
+  }
+task1<-sum(antTrack==1)
+task2<-sum(antTrack==2)
+
+timeProportion[r,]<-c(sum(task1)/timesteps,sum(task2)/timesteps)
+  }
+
+```
+```{r}
+antFate<-timeProportion/rowSums(timeProportion)
+hist(antFate[,2])
+hist(antFate[,1])
+```
+
+
+```{r}
+n<-10
+reps<-200
+timesteps<-10000
+
+
+#constants from figure 6 of paper
+m<-2
+threshMean<-10
+threshSD<-0.1
+eta<-7
+tau<-0.2
+demandRate<-0.6
+
+```
+
+```{r}
+timeProportion<-matrix(data=0,nrow=reps,ncol=m)
+antThresh_1<-matrix(data=0,nrow = reps,ncol=n)
+antThresh_2<-matrix(data=0,nrow = reps,ncol=n)
+antTimeTask1<-matrix(data=0,nrow=reps,ncol=n)
+antTimeTask2<-matrix(data=0,nrow=reps,ncol=n)
+
+antTimeTask1_track<-matrix(data=0,nrow=1,ncol=n)
+antTimeTask2_track<-matrix(data=0,nrow=1,ncol=n)
+  for (r in 1:reps) {
+    thresholdMat<-matrix(data=rnorm(n*m,mean = threshMean,sd=threshSD*threshMean),nrow=n,ncol=m)
+
+
+activityMat<-matrix(data=0,nrow=n,ncol=m)
+
+#active(1) or inactive (0)
+
+activity<-vector(mode="numeric", length=n)
+
+#stimulus
+stimulusVec<-vector(mode="numeric", length=m)
+
+antTrack<-vector(mode="numeric", length=timesteps)
+antTimeTask1_track<-matrix(data=0,nrow=1,ncol=n)
+antTimeTask2_track<-matrix(data=0,nrow=1,ncol=n)
+for (t in 1:timesteps) {
+  #update probabilities
+  probabilities<-probabilityfunc(threshMat=thresholdMat, stimVec = stimulusVec,n=n,m=m, eta=eta)
+  
+  #update individuals
+  activity<-rowSums(activityMat)
+  quits<-rbinom(n=n,size=1,prob=tau)
+  for (i in 1:n) {
+    #active individuals may become inactive
+    if (activity[i]==1&&quits[i]==1) {
+        activityMat[i,]<-matrix(data=0,nrow=1,ncol=m)
+    }
+    #inactive individuals may become active 
+    if (activity[i]==0) {
+      seq<-sample(1:m,m)
+      for (j in 1:m) {
+        activity[i]<-sum(activityMat[i,])
+        if (activity[i]==0) {
+          taskNum<-seq[j]
+          taskProb<-probabilities[i,taskNum]
+          activityMat[i,taskNum]<-rbinom(n=1,size=1,prob=taskProb)
+        }
+      }
+    }
+    }
+  
+  #change stimulus from activity in the past timestep
+  stimulusVec<-stimFunc(stimulusVec,activityMat,demandRate,alpha,n) 
+  
+  #record data
+  antTrack[t]<-sum(activityMat[1,]*1:m)
+  antTimeTask1_track<-antTimeTask1_track+activityMat[,1]
+  antTimeTask2_track<-antTimeTask2_track+activityMat[,2]
+  }
+task1<-sum(antTrack==1)
+task2<-sum(antTrack==2)
+
+timeProportion[r,]<-c(sum(task1)/timesteps,sum(task2)/timesteps)
+
+antThresh_1[r,]<-thresholdMat[,1]
+antThresh_2[r,]<-thresholdMat[,2]
+antTimeTask1[r,]<-antTimeTask1_track
+antTimeTask2[r,]<-antTimeTask2_track
+  }
+
+```
+
+```{r}
+antFate<-timeProportion/rowSums(timeProportion)
+hist(antFate[,1])
+hist(antFate[,2])
+```
+##principal component analysis?? 
+consider difference between thresholds or ratios  of thresholds to each other or colony averages
+increase colony size---compare 30 ant colonies--what  do we measure? expect less of a spread? or less dependence on threshold 2?
+Vs THRESHOLD
+```{r}
+library(ggplot2)
+library(dplyr)
+T1_vec<-antThresh_1 %>% as.vector()
+T2_vec<-antThresh_2 %>% as.vector()
+Task1_vec<-antTimeTask1 %>% as.vector()
+Task2_vec<-antTimeTask2 %>% as.vector()
+Task1_vec<-Task1_vec/timesteps
+Task2_vec<-Task2_vec/timesteps
+Task1_colonyavg_deviation<-T1_vec-rowMeans(antThresh_1)
+Task2_colonyavg_deviation<-T2_vec-rowMeans(antThresh_2)
+df<-cbind(T1_vec,T2_vec,Task1_vec,Task2_vec,Task1_colonyavg_deviation,Task2_colonyavg_deviation) %>% as.data.frame()
+colnames(df)<-c("task1_threshold","task2_threshold","time_on_task1","time_on_task2","task1_threshold_colonyavg_deviation","task2_threshold_colonyavg_deviation")
+
+
+
+ggplot(df)+
+  geom_point(aes(x=task1_threshold,y=time_on_task1),col="blue",alpha=0.5)+
+  geom_point(aes(x=task2_threshold,y=time_on_task2),col="red",alpha=0.5)
+
+ggplot(df)+
+  geom_point(aes(x=task1_threshold,y=time_on_task1),col="blue",alpha=0.5)+
+  geom_smooth(aes(x=task1_threshold,y=time_on_task1),method="lm")
+
+ggplot(df)+
+  geom_point(aes(x=task2_threshold,y=time_on_task1),col="blue",alpha=0.5)+
+  geom_smooth(aes(x=task2_threshold,y=time_on_task1),method="lm")
+
+ggplot(df)+
+  geom_point(aes(x=task1_threshold_colonyavg_deviation,y=time_on_task1),col="blue",alpha=0.5)+
+  geom_smooth(aes(x=task1_threshold_colonyavg_deviation,y=time_on_task1),method="lm")
+
+ggplot(df)+
+  geom_point(aes(x=task2_threshold_colonyavg_deviation,y=time_on_task1),col="blue",alpha=0.5)+
+  geom_smooth(aes(x=task2_threshold_colonyavg_deviation,y=time_on_task1),method="lm")
+
+
+lm_task1_vs_task1_thresh<-lm(time_on_task1~task1_threshold,data=df)
+summary(lm_task1_vs_task1_thresh)
+lm_task1_vs_task1_thresh_dev<-lm(time_on_task1~task1_threshold_colonyavg_deviation,data=df)
+summary(lm_task1_vs_task1_thresh_dev)
+lm_task1_vs_task2_thresh<-lm(time_on_task1~task2_threshold,data=df)
+summary(lm_task1_vs_task2_thresh)
+
+
+rgl::plot3d(x=df$task1_threshold_colonyavg_deviation, y=df$task2_threshold_colonyavg_deviation, z=df$time_on_task1)
+```
+
+What to compare each time? 
+
+take the end?
+
+```{r}
+#attempt to replicate figure 6a
+n_vec<-c(1,2,4,6,8,12,16,32,100)
+reps<-100
+timesteps<-2000
+
+antTimeTask1<-matrix(data=0,nrow=reps,ncol=n)
+T1_performancefreq_all<-matrix(data = NA,nrow=1,ncol=4) %>% as.data.frame()
+colnames(T1_performancefreq_all) <- c("iteration","ant","task1_freq","num_ants")
+antTimeTask1_track<-matrix(data=0,nrow=1,ncol=n)
+for (w in 1:length(n_vec)) {
+  n<-n_vec[w]
+  antTimeTask1<-matrix(data=0,nrow=reps,ncol=n)
+  for (r in 1:reps) {
+    thresholdMat<-matrix(data=rnorm(n*m,mean = threshMean,sd=threshSD*threshMean),nrow=n,ncol=m)
+
+
+activityMat<-matrix(data=0,nrow=n,ncol=m)
+
+#active(1) or inactive (0)
+
+activity<-vector(mode="numeric", length=n)
+
+#stimulus
+stimulusVec<-vector(mode="numeric", length=m)
+
+antTimeTask1_track<-matrix(data=0,nrow=1,ncol=n)
+antTimeTask2_track<-matrix(data=0,nrow=1,ncol=n)
+for (t in 1:timesteps) {
+  #update probabilities
+  probabilities<-probabilityfunc(threshMat=thresholdMat, stimVec = stimulusVec,n=n,m=m, eta=eta)
+  
+  #update individuals
+  activity<-rowSums(activityMat)
+  quits<-rbinom(n=n,size=1,prob=tau)
+  for (i in 1:n) {
+    #active individuals may become inactive
+    if (activity[i]==1&&quits[i]==1) {
+        activityMat[i,]<-matrix(data=0,nrow=1,ncol=m)
+    }
+    #inactive individuals may become active 
+    if (activity[i]==0) {
+      seq<-sample(1:m,m)
+      for (j in 1:m) {
+        activity[i]<-sum(activityMat[i,])
+        if (activity[i]==0) {
+          taskNum<-seq[j]
+          taskProb<-probabilities[i,taskNum]
+          activityMat[i,taskNum]<-rbinom(n=1,size=1,prob=taskProb)
+        }
+      }
+    }
+    }
+  
+  #change stimulus from activity in the past timestep
+  stimulusVec<-stimFunc(stimulusVec,activityMat,demandRate,alpha,n) 
+  
+  #record data
+
+  antTimeTask1_track<-antTimeTask1_track+activityMat[,1]
+
+  }
+
+
+antTimeTask1[r,]<-antTimeTask1_track
+
+
+
+  }
+  antTimeTask1_df<-as.data.frame(antTimeTask1)
+  antTimeTask1_df$iteration<-c(1:reps)
+  addendum<- antTimeTask1_df %>% pivot_longer(cols=1:n, names_to = "ant",values_to = "task1_freq") %>% mutate(num_ants=n)
+  T1_performancefreq_all<-rbind(T1_performancefreq_all,addendum)
+  
+}
+
+T1_performancefreq_all<-T1_performancefreq_all %>% na.omit()
+T1_performancefreq_all<-T1_performancefreq_all %>% mutate(task1_prop=task1_freq/timesteps)
+
+ggplot(T1_performancefreq_all)+
+  geom_point(mapping=aes(x=num_ants,y=task1_prop))+
+  geom_boxplot(aes(x=num_ants,y=task1_prop,color=as.factor(num_ants)),alpha=0.2)
+ggplot(T1_performancefreq_all %>% filter(num_ants<25))+
+  geom_jitter(mapping=aes(x=num_ants,y=task1_prop,color=as.factor(num_ants)),width=0.5,height=0)+
+  geom_boxplot(aes(x=num_ants,y=task1_prop,color=as.factor(num_ants)),alpha=0.2)
+
+plot_df<-T1_performancefreq_all %>% mutate(x_coord<-num_ants)
+```
+
+```{r}
+#attempt to replicate figure 6a
+n_vec<-c(1,2,3,4,6,8,10,12,16,32,100)
+reps<-100
+timesteps<-10000
+
+antTimeTask1<-matrix(data=0,nrow=reps,ncol=length(n_vec))
+T1_performancefreq_all<-matrix(data = NA,nrow=1,ncol=4) %>% as.data.frame()
+colnames(T1_performancefreq_all) <- c("iteration","ant","task1_freq","num_ants")
+antTimeTask1_track<-matrix(data=0,nrow=1,ncol=n)
+for (w in 1:length(n_vec)) {
+  n<-n_vec[w]
+  antTimeTask1<-matrix(data=0,nrow=reps,ncol=n)
+  for (r in 1:reps) {
+    thresholdMat<-matrix(data=rnorm(n*m,mean = threshMean,sd=threshSD*threshMean),nrow=n,ncol=m)
+
+
+activityMat<-matrix(data=0,nrow=n,ncol=m)
+
+#active(1) or inactive (0)
+
+activity<-vector(mode="numeric", length=n)
+
+#stimulus
+stimulusVec<-vector(mode="numeric", length=m)
+
+antTimeTask1_track<-matrix(data=0,nrow=1,ncol=n)
+antTimeTask2_track<-matrix(data=0,nrow=1,ncol=n)
+for (t in 1:timesteps) {
+  #update probabilities
+  probabilities<-probabilityfunc(threshMat=thresholdMat, stimVec = stimulusVec,n=n,m=m, eta=eta)
+  
+  #update individuals
+  activity<-rowSums(activityMat)
+  quits<-rbinom(n=n,size=1,prob=tau)
+  for (i in 1:n) {
+    #active individuals may become inactive
+    if (activity[i]==1&&quits[i]==1) {
+        activityMat[i,]<-matrix(data=0,nrow=1,ncol=m)
+    }
+    #inactive individuals may become active 
+    if (activity[i]==0) {
+      seq<-sample(1:m,m)
+      for (j in 1:m) {
+        activity[i]<-sum(activityMat[i,])
+        if (activity[i]==0) {
+          taskNum<-seq[j]
+          taskProb<-probabilities[i,taskNum]
+          activityMat[i,taskNum]<-rbinom(n=1,size=1,prob=taskProb)
+        }
+      }
+    }
+    }
+  
+  #change stimulus from activity in the past timestep
+  stimulusVec<-stimFunc(stimulusVec,activityMat,demandRate,alpha,n) 
+  
+  #record data
+
+  antTimeTask1_track<-antTimeTask1_track+activityMat[,1]
+
+  }
+
+
+antTimeTask1[r,]<-antTimeTask1_track
+
+
+
+  }
+  antTimeTask1_df<-as.data.frame(antTimeTask1)
+  antTimeTask1_df$iteration<-c(1:reps)
+  addendum<- antTimeTask1_df %>% pivot_longer(cols=1:n, names_to = "ant",values_to = "task1_freq") %>% mutate(num_ants=n)
+  T1_performancefreq_all<-rbind(T1_performancefreq_all,addendum)
+  
+}
+
+T1_performancefreq_all<-T1_performancefreq_all %>% na.omit()
+T1_performancefreq_all<-T1_performancefreq_all %>% mutate(task1_prop=task1_freq/timesteps)
+
+ggplot(T1_performancefreq_all)+
+  geom_point(mapping=aes(x=num_ants,y=task1_prop))+
+  geom_boxplot(aes(x=num_ants,y=task1_prop,color=as.factor(num_ants)),alpha=0.2)
+ggplot(T1_performancefreq_all %>% filter(num_ants<25))+
+  geom_jitter(mapping=aes(x=num_ants,y=task1_prop,color=as.factor(num_ants)),width=0.5,height=0)+
+  geom_boxplot(aes(x=num_ants,y=task1_prop,color=as.factor(num_ants)),alpha=0.2)
+
+plot_df<-T1_performancefreq_all %>% mutate(x_coord<-num_ants)
+```
+
